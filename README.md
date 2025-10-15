@@ -19,7 +19,6 @@ memwatch [OPTIONS] -- <command> [args...]
 | Option           | Description                           | Default |
 | ---------------- | ------------------------------------- | ------- |
 | `-i, --interval` | Update interval in milliseconds       | 500     |
-| `--unit`         | Output unit: `auto`, `kb`, `mb`, `gb` | `auto`  |
 
 ## Output
 

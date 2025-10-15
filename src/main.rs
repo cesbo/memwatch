@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    io,
+    io::{
+        self,
+        Write,
+    },
     process::{
         Command,
         Stdio,
@@ -17,6 +20,10 @@ use procfs::process::{
     all_processes,
     Process,
 };
+use termion::{
+    clear,
+    cursor,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,10 +34,6 @@ struct Args {
     /// Update interval in milliseconds
     #[arg(short, long, default_value_t = 500)]
     interval: u64,
-
-    /// Unit for printing: auto|kb|mb|gb
-    #[arg(long, default_value = "auto")]
-    unit: String,
 
     /// Command to run (everything after `--`)
     #[arg(trailing_var_arg = true, required = true)]
@@ -57,16 +60,22 @@ fn main() -> io::Result<()> {
     let interval = Duration::from_millis(args.interval);
     let start = Instant::now();
 
-    let mut last_print_len = 0usize;
+    // Hide cursor during monitoring
+    print!("{}", cursor::Hide);
+    io::stdout().flush().ok();
+
+    // Ensure cursor is shown on exit
+    let _guard = CursorGuard;
 
     loop {
         // Check if process exited
         if let Some(status) = child.try_wait()? {
             // Print a final line with exit status
             let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
-            let line = format_status_line(&args.unit, start.elapsed(), rss, vsz);
-            clear_line(last_print_len);
-            println!("{}", line);
+            let line = format_status_line(start.elapsed(), rss, vsz);
+            print!("\r{}{}", clear::CurrentLine, line);
+            io::stdout().flush().ok();
+            println!();
             eprintln!("Process exited with status: {}", status);
             break;
         }
@@ -75,13 +84,10 @@ fn main() -> io::Result<()> {
         let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
 
         // Render single updating line
-        let line = format_status_line(&args.unit, start.elapsed(), rss, vsz);
+        let line = format_status_line(start.elapsed(), rss, vsz);
 
-        // Overwrite the same line in-place
-        print!("\r{}", line);
-        // Track printed length to clear leftovers on the last line
-        last_print_len = line.len();
-        use std::io::Write;
+        // Clear line and print new content
+        print!("\r{}{}", clear::CurrentLine, line);
         io::stdout().flush().ok();
 
         sleep(interval);
@@ -126,9 +132,19 @@ fn meminfo(root_pid: i32) -> procfs::ProcResult<(u64, u64)> {
     Ok((total_rss, total_vsz))
 }
 
-fn format_status_line(unit: &str, elapsed: Duration, rss_bytes: u64, vsz_bytes: u64) -> String {
-    let (rss_val, rss_unit) = format_bytes_unit(rss_bytes, unit);
-    let (vsz_val, vsz_unit) = format_bytes_unit(vsz_bytes, unit);
+/// Guard to ensure cursor is shown on exit (even on panic or Ctrl+C)
+struct CursorGuard;
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        print!("{}", cursor::Show);
+        let _ = io::stdout().flush();
+    }
+}
+
+fn format_status_line(elapsed: Duration, rss_bytes: u64, vsz_bytes: u64) -> String {
+    let (rss_val, rss_unit) = format_bytes_unit(rss_bytes);
+    let (vsz_val, vsz_unit) = format_bytes_unit(vsz_bytes);
     let (mm, ss) = (elapsed.as_secs() / 60, elapsed.as_secs() % 60);
 
     format!(
@@ -137,30 +153,15 @@ fn format_status_line(unit: &str, elapsed: Duration, rss_bytes: u64, vsz_bytes: 
     )
 }
 
-fn clear_line(prev_len: usize) {
-    if prev_len > 0 {
-        print!("\r{:width$}\r", "", width = prev_len);
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-    }
-}
-
 /// Format to chosen unit (auto/kb/mb/gb)
-fn format_bytes_unit(bytes: u64, unit: &str) -> (f64, &'static str) {
-    match unit.to_ascii_lowercase().as_str() {
-        "kb" => (bytes as f64 / 1024.0, "KB"),
-        "mb" => (bytes as f64 / (1024.0 * 1024.0), "MB"),
-        "gb" => (bytes as f64 / (1024.0 * 1024.0 * 1024.0), "GB"),
-        _ => {
-            // auto
-            if bytes >= 1024_u64.pow(3) {
-                (bytes as f64 / 1024f64.powi(3), "GB")
-            } else if bytes >= 1024_u64.pow(2) {
-                (bytes as f64 / 1024f64.powi(2), "MB")
-            } else if bytes >= 1024 {
-                (bytes as f64 / 1024.0, "KB")
-            } else {
-                (bytes as f64, "B")
-            }
-        }
+fn format_bytes_unit(bytes: u64) -> (f64, &'static str) {
+    if bytes >= 1024_u64.pow(3) {
+        (bytes as f64 / 1024f64.powi(3), "GB")
+    } else if bytes >= 1024_u64.pow(2) {
+        (bytes as f64 / 1024f64.powi(2), "MB")
+    } else if bytes >= 1024 {
+        (bytes as f64 / 1024.0, "KB")
+    } else {
+        (bytes as f64, "B")
     }
 }
