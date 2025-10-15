@@ -8,6 +8,13 @@ use std::{
         Command,
         Stdio,
     },
+    sync::{
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+        Arc,
+    },
     thread::sleep,
     time::{
         Duration,
@@ -44,6 +51,14 @@ struct Args {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
+    // Shared flag for Ctrl+C signal
+    let terminated = Arc::new(AtomicBool::new(false));
+    let term_flag = terminated.clone();
+    ctrlc::set_handler(move || {
+        term_flag.store(true, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl+C handler");
+
     // Spawn child, inherit stdio so you see its output
     let mut cmd_iter = args.command.iter();
     let prog = cmd_iter.next().unwrap();
@@ -69,15 +84,27 @@ fn main() -> io::Result<()> {
     let _guard = CursorGuard;
 
     loop {
-        // Check if process exited
-        if let Some(status) = child.try_wait()? {
-            // Print a final line with exit status
-            let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
-            let line = format_status_line(start.elapsed(), rss, vsz);
-            print!("\r{}{}", clear::CurrentLine, line);
+        if terminated.load(Ordering::SeqCst) {
+            // Attempt to terminate child process if still running
+            let _ = child.kill();
+            let _ = child.wait();
+
             io::stdout().flush().ok();
             println!();
-            eprintln!("Process exited with status: {}", status);
+            eprintln!("Interrupted (Ctrl+C)");
+
+            break;
+        }
+
+        // Check if process exited
+        if let Some(status) = child.try_wait()? {
+            io::stdout().flush().ok();
+            println!();
+            eprintln!(
+                "Process exited with status: {}",
+                status.code().unwrap_or(-1)
+            );
+
             break;
         }
 
