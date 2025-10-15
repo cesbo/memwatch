@@ -1,14 +1,27 @@
 use std::{
     io,
-    process::{Command, Stdio},
+    process::{
+        Command,
+        Stdio,
+    },
     thread::sleep,
-    time::{Duration, Instant},
+    time::{
+        Duration,
+        Instant,
+    },
 };
+
 use clap::Parser;
-use procfs::process::{all_processes, Process};
+use procfs::process::{
+    all_processes,
+    Process,
+};
 
 #[derive(Parser, Debug)]
-#[command(name="memwatch", about="Run a command and watch its memory (Linux)")]
+#[command(
+    name = "memwatch",
+    about = "Run a command and watch its memory (Linux)"
+)]
 struct Args {
     /// Update interval in milliseconds
     #[arg(short, long, default_value_t = 500)]
@@ -50,12 +63,7 @@ fn main() -> io::Result<()> {
         if let Some(status) = child.try_wait()? {
             // Print a final line with exit status
             let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
-            let line = format_status_line(
-                &args.unit,
-                start.elapsed(),
-                rss,
-                vsz,
-            );
+            let line = format_status_line(&args.unit, start.elapsed(), rss, vsz);
             clear_line(last_print_len);
             println!("{}", line);
             eprintln!("Process exited with status: {}", status);
@@ -66,12 +74,7 @@ fn main() -> io::Result<()> {
         let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
 
         // Render single updating line
-        let line = format_status_line(
-            &args.unit,
-            start.elapsed(),
-            rss,
-            vsz,
-        );
+        let line = format_status_line(&args.unit, start.elapsed(), rss, vsz);
 
         // Overwrite the same line in-place
         print!("\r{}", line);
@@ -127,12 +130,7 @@ fn meminfo(pid: i32) -> procfs::ProcResult<(u64, u64)> {
     Ok((total_rss, total_vsz))
 }
 
-fn format_status_line(
-    unit: &str,
-    elapsed: Duration,
-    rss_bytes: u64,
-    vsz_bytes: u64,
-) -> String {
+fn format_status_line(unit: &str, elapsed: Duration, rss_bytes: u64, vsz_bytes: u64) -> String {
     let (rss_val, rss_unit) = format_bytes_unit(rss_bytes, unit);
     let (vsz_val, vsz_unit) = format_bytes_unit(vsz_bytes, unit);
     let (mm, ss) = (elapsed.as_secs() / 60, elapsed.as_secs() % 60);
@@ -170,4 +168,3 @@ fn format_bytes_unit(bytes: u64, unit: &str) -> (f64, &'static str) {
         }
     }
 }
-
