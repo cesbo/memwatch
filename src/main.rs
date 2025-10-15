@@ -13,9 +13,10 @@ use std::{
             AtomicBool,
             Ordering,
         },
+        mpsc,
         Arc,
     },
-    thread::sleep,
+    thread,
     time::{
         Duration,
         Instant,
@@ -31,6 +32,11 @@ use termion::{
     clear,
     cursor,
 };
+
+enum OutputMsg {
+    Stdout(String),
+    Stderr(String),
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,14 +73,52 @@ fn main() -> io::Result<()> {
     let mut child = Command::new(prog)
         .args(&child_args)
         .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| io::Error::new(e.kind(), format!("failed to spawn `{}`: {}", prog, e)))?;
 
     let pid = child.id() as i32;
     let interval = Duration::from_millis(args.interval);
     let start = Instant::now();
+
+    // Channel for output lines
+    let (tx, rx) = mpsc::channel::<OutputMsg>();
+
+    // Thread reading child's stdout
+    if let Some(stdout) = child.stdout.take() {
+        let tx_out = tx.clone();
+        thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = io::BufReader::new(stdout);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    // Ignore send errors (main thread may have exited)
+                    let _ = tx_out.send(OutputMsg::Stdout(l));
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Thread reading child's stderr
+    if let Some(stderr) = child.stderr.take() {
+        let tx_err = tx.clone();
+        thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = io::BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    let _ = tx_err.send(OutputMsg::Stderr(l));
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+
+    drop(tx); // Close the original Sender in the main thread
 
     // Hide cursor during monitoring
     print!("{}", cursor::Hide);
@@ -83,42 +127,69 @@ fn main() -> io::Result<()> {
     // Ensure cursor is shown on exit
     let _guard = CursorGuard;
 
+    // No need to buffer previously printed non-empty lines; we print immediately
     loop {
-        if terminated.load(Ordering::SeqCst) {
-            // Attempt to terminate child process if still running
-            let _ = child.kill();
-            let _ = child.wait();
-
-            io::stdout().flush().ok();
-            println!();
-            eprintln!("Interrupted (Ctrl+C)");
-
-            break;
+        // First, drain all available messages without blocking
+        while let Ok(msg) = rx.try_recv() {
+            // Before printing a program line, clear the status line
+            print!("\r{}", clear::CurrentLine);
+            match msg {
+                OutputMsg::Stdout(l) => {
+                    println!("{}", l);
+                }
+                OutputMsg::Stderr(l) => {
+                    // Visually distinguish stderr
+                    eprintln!("{}", l);
+                }
+            }
         }
 
-        // Check if process exited
+        // Check for process termination / Ctrl+C signal
+        if terminated.load(Ordering::SeqCst) {
+            let _ = child.kill();
+        }
+
         if let Some(status) = child.try_wait()? {
+            // Process finished: print final status line and message
+            let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
+            let status_line = format_status_line(start.elapsed(), rss, vsz);
+            print!("\r{}{}\n", clear::CurrentLine, status_line);
             io::stdout().flush().ok();
-            println!();
             eprintln!(
                 "Process exited with status: {}",
                 status.code().unwrap_or(-1)
             );
-
+            if terminated.load(Ordering::SeqCst) {
+                eprintln!("Interrupted (Ctrl+C)");
+            }
             break;
         }
 
-        // Sample memory
+        // Refresh status line on each interval
         let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
-
-        // Render single updating line
-        let line = format_status_line(start.elapsed(), rss, vsz);
-
-        // Clear line and print new content
-        print!("\r{}{}", clear::CurrentLine, line);
+        let status_line = format_status_line(start.elapsed(), rss, vsz);
+        print!("\r{}{}", clear::CurrentLine, status_line);
         io::stdout().flush().ok();
 
-        sleep(interval);
+        // Wait for interval or a new line (block at most for 'interval')
+        match rx.recv_timeout(interval) {
+            Ok(msg) => {
+                // Got a line before the timer: print it and immediately redraw status
+                print!("\r{}", clear::CurrentLine);
+                match msg {
+                    OutputMsg::Stdout(l) => println!("{}", l),
+                    OutputMsg::Stderr(l) => eprintln!("{}", l),
+                }
+                continue; // Loop back to redraw the status without extra delay
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Nothing arrived – just next tick
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // All reader threads closed – child likely exited; loop will confirm
+                continue;
+            }
+        }
     }
 
     Ok(())
