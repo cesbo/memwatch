@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io,
     process::{
         Command,
@@ -89,41 +90,36 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn meminfo(pid: i32) -> procfs::ProcResult<(u64, u64)> {
+fn meminfo(root_pid: i32) -> procfs::ProcResult<(u64, u64)> {
     let page_size = procfs::page_size();
-    let mut total_rss = 0u64;
-    let mut total_vsz = 0u64;
 
-    let mut pids = vec![pid];
-
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(pid);
-    loop {
-        let mut added = false;
-        for proc in all_processes()? {
-            let proc = match proc {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+    let mut children_map: HashMap<i32, Vec<i32>> = HashMap::new();
+    for proc in all_processes()? {
+        if let Ok(proc) = proc {
             if let Ok(stat) = proc.stat() {
-                if seen.contains(&stat.ppid) && !seen.contains(&stat.pid) {
-                    seen.insert(stat.pid);
-                    pids.push(stat.pid);
-                    added = true;
-                }
+                children_map
+                    .entry(stat.ppid)
+                    .or_insert_with(Vec::new)
+                    .push(stat.pid);
             }
-        }
-        if !added {
-            break;
         }
     }
 
-    for pid in pids {
+    let mut total_rss = 0u64;
+    let mut total_vsz = 0u64;
+
+    let mut stack = vec![root_pid];
+
+    while let Some(pid) = stack.pop() {
         if let Ok(proc) = Process::new(pid) {
             if let Ok(statm) = proc.statm() {
                 total_vsz = total_vsz.saturating_add(statm.size * page_size);
                 total_rss = total_rss.saturating_add(statm.resident * page_size);
             }
+        }
+
+        if let Some(children) = children_map.get(&pid) {
+            stack.extend(children);
         }
     }
 
