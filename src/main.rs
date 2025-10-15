@@ -151,14 +151,12 @@ fn main() -> io::Result<()> {
 
         if let Some(status) = child.try_wait()? {
             // Process finished: print final status line and message
-            let (rss, vsz) = meminfo(pid).unwrap_or((0, 0));
-            let status_line = format_status_line(start.elapsed(), rss, vsz);
-            print!("\r{}{}\n", clear::CurrentLine, status_line);
+            println!();
             io::stdout().flush().ok();
-            eprintln!(
-                "Process exited with status: {}",
-                status.code().unwrap_or(-1)
-            );
+
+            if let Some(code) = status.code() {
+                eprintln!("Process exited with status: {}", code);
+            }
             if terminated.load(Ordering::SeqCst) {
                 eprintln!("Interrupted (Ctrl+C)");
             }
