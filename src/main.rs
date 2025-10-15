@@ -30,9 +30,10 @@ use termion::{
     name = "memwatch",
     about = "Run a command and watch its memory (Linux)"
 )]
+#[command(version)]
 struct Args {
     /// Update interval in milliseconds
-    #[arg(short, long, default_value_t = 500)]
+    #[arg(short, long, default_value_t = 1000)]
     interval: u64,
 
     /// Command to run (everything after `--`)
